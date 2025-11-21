@@ -2,10 +2,10 @@ import csv
 import traceback
 import os
 from datetime import datetime
+import mysql.connector
 
 print("app.py 開始執行")
 
-# 顯示目前工作目錄（檢查是否在 exhibitions 資料夾）
 print("當前工作目錄:", os.getcwd())
 
 # 匯入模組
@@ -19,7 +19,7 @@ try:
     from tfam import fetch_tfam_exhibitions
     from ntnu import fetch_ntnu_exhibitions
     print("模組匯入成功")
-except Exception as e:
+except Exception:
     print("匯入模組時發生錯誤：")
     traceback.print_exc()
     input("按 Enter 結束")
@@ -92,15 +92,9 @@ def collect_all_exhibitions():
 def save_to_csv(exhibitions):
     print(f"準備寫入 CSV（共 {len(exhibitions)} 筆）")
 
-    # ---------------------------------------------------------
-    # 新增：建立 Downloads 資料夾
-    # ---------------------------------------------------------
     downloads_dir = os.path.join(os.getcwd(), "Downloads")
     os.makedirs(downloads_dir, exist_ok=True)
 
-    # ---------------------------------------------------------
-    # 新增：建立帶有時間戳記的檔名
-    # ---------------------------------------------------------
     timestamp = datetime.now().strftime("%Y%m%d%H%M")
     filename = f"all_museums_exhibitions_{timestamp}.csv"
     file_path = os.path.join(downloads_dir, filename)
@@ -114,14 +108,50 @@ def save_to_csv(exhibitions):
     print(f"CSV 寫入完成：{file_path}")
 
 
+def save_to_db(exhibitions):
+    print("準備寫入 MariaDB...")
+
+    conn = mysql.connector.connect(
+        host="127.0.0.1",
+        port=3307,   # 如果有改port，這裡須注意
+        user="test",
+        password="123456",
+        database="exhibition_db"
+    )
+    cursor = conn.cursor()
+
+    sql = """
+        INSERT INTO exhibitions
+        (museum, title, date, topic, url, image_url, location, time, category, extra)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    for ex in exhibitions:
+        n = normalize(ex)
+        cursor.execute(sql, (
+            n["館別"], n["展覽名稱"], n["展覽日期"], n["展覽主題"],
+            n["展覽連結"], n["展覽圖片"], n["展覽地點"],
+            n["展覽時間"], n["展覽類別"], n["備註"]
+        ))
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    print("MariaDB 寫入完成")
+
+
 def main():
     print("進入 main()")
     try:
         exhibitions = collect_all_exhibitions()
         print(f"全部抓完，共 {len(exhibitions)} 筆")
+
         save_to_csv(exhibitions)
+        save_to_db(exhibitions)
+
         print("程式執行完畢")
-    except Exception as e:
+    except Exception:
         print("main() 執行過程中發生錯誤：")
         traceback.print_exc()
         input("按 Enter 結束")
