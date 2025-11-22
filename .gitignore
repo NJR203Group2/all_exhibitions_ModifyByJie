@@ -57,3 +57,4 @@ htmlcov/
 # 改成指定忽略某個資料夾，例如：
 # data/raw/
 Downloads/
+.vscode/
