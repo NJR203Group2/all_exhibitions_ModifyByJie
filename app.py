@@ -3,6 +3,7 @@ import traceback
 import os
 from datetime import datetime
 import mysql.connector
+from datetime import datetime
 
 print("app.py 開始執行")
 
@@ -107,23 +108,27 @@ def save_to_csv(exhibitions):
 
     print(f"CSV 寫入完成：{file_path}")
 
-
 def save_to_db(exhibitions):
     print("準備寫入 MariaDB...")
 
     conn = mysql.connector.connect(
         host="127.0.0.1",
-        port=3307,   # 如果有改port，這裡須注意
+        port=3307,
         user="test",
         password="123456",
         database="exhibition_db"
     )
     cursor = conn.cursor()
 
+    # 每次執行 app.py 產生一個批次 ID（例如 202511222230）
+    batch_id = datetime.now().strftime("%Y%m%d%H%M")
+    # 這裡用的是主機的「本地時間」，你的 Windows 已經是台北時區
+    created_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     sql = """
         INSERT INTO exhibitions
-        (museum, title, date, topic, url, image_url, location, time, category, extra)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (museum, title, date, topic, url, image_url, location, time, category, extra, batch_id, created_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     for ex in exhibitions:
@@ -131,15 +136,15 @@ def save_to_db(exhibitions):
         cursor.execute(sql, (
             n["館別"], n["展覽名稱"], n["展覽日期"], n["展覽主題"],
             n["展覽連結"], n["展覽圖片"], n["展覽地點"],
-            n["展覽時間"], n["展覽類別"], n["備註"]
+            n["展覽時間"], n["展覽類別"], n["備註"],
+            batch_id, created_at_str
         ))
 
     conn.commit()
     cursor.close()
     conn.close()
 
-    print("MariaDB 寫入完成")
-
+    print("MariaDB 寫入完成，batch_id =", batch_id)
 
 def main():
     print("進入 main()")
