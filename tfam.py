@@ -1,122 +1,149 @@
-# tfam.py
+# tfam.py（無 Selenium 版本）
 import re
 from urllib.parse import urljoin
 
 import requests as req
 from bs4 import BeautifulSoup as bs
 import urllib3
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from requests.exceptions import RequestException, ReadTimeout
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 session = req.Session()
 session.verify = False
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+})
 
 
-def get_driver(headless=True):
-    from selenium.webdriver.chrome.options import Options
-    opts = Options()
-    if headless:
-        opts.add_argument("--headless")
-    opts.add_argument("--window-size=1920,1080")
-    opts.add_argument("--lang=zh-TW")
-    opts.add_argument("--disable-gpu")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    try:
-        return webdriver.Chrome(options=opts)
-    except Exception as e:
-        print("⚠️ 無法啟動 Selenium driver，略過北美館：", repr(e))
-        return None
+def safe_get(url, retries=3, timeout=20, tag="[北美館]"):
+    for i in range(retries):
+        try:
+            r = session.get(url, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except ReadTimeout:
+            print(f"{tag} 讀取超時，第 {i + 1} 次重試：{url}")
+        except RequestException as e:
+            print(f"{tag} 請求失敗，第 {i + 1} 次重試：{url}，錯誤：{e}")
+            break
+    print(f"{tag} 多次嘗試後仍無法取得內容，跳過：{url}")
+    return None
 
 
 def fetch_tfam_exhibitions():
     BASE = "https://www.tfam.museum/"
     HOME = "https://www.tfam.museum/index.aspx?ddlLang=zh-tw"
     EXH = "https://www.tfam.museum/Exhibition/Exhibition.aspx?ddlLang=zh-tw"
-    CONTAINER_XPATH = '/html/body/form/div[3]/div[3]/div/div[2]'
 
     # 抓館名
     museum_name = "臺北市立美術館"
-    r = session.get(HOME, timeout=20)
-    r.raise_for_status()
-    html = bs(r.text, "html.parser")
-    tfam = html.find("div", class_="footer-info-container")
-    if tfam:
-        tfam_text = tfam.get_text(" ", strip=True)
-        m = re.search(r"臺北市立美術館", tfam_text)
-        if m:
-            museum_name = m.group()
-
-    driver = get_driver(headless=True)
-    if driver is None:
-        return []
+    r_home = safe_get(HOME, tag="[北美館 HOME]")
+    if r_home is not None:
+        html_home = bs(r_home.text, "html.parser")
+        tfam = html_home.find("div", class_="footer-info-container")
+        if tfam:
+            tfam_text = tfam.get_text(" ", strip=True)
+            m = re.search(r"臺北市立美術館", tfam_text)
+            if m:
+                museum_name = m.group()
 
     results = []
-    try:
-        driver.get(EXH)
-        wait = WebDriverWait(driver, 20)
-        container = wait.until(EC.presence_of_element_located((By.XPATH, CONTAINER_XPATH)))
-        items = container.find_elements(By.XPATH, "./div")
 
-        for it in items:
-            # 圖片
-            img_src = ""
-            try:
-                img = it.find_element(By.XPATH, "./div[1]/img")
-                img_src = img.get_attribute("src") or ""
-                img_src = urljoin(BASE, img_src)
-            except Exception:
-                pass
+    # 1) 取得展覽列表頁
+    print("[北美館] 取得展覽列表頁...")
+    r_exh = safe_get(EXH, tag="[北美館 EXH]")
+    if r_exh is None:
+        print("[北美館] 無法取得列表頁，返回空陣列")
+        return results
 
-            # 展覽標題
+    soup_list = bs(r_exh.text, "html.parser")
+
+    # 2) 從列表頁找出所有詳細頁連結
+    detail_urls = set()
+    for a in soup_list.select("a[href]"):
+        href = a["href"]
+        if "Exhibition_Special.aspx" in href and "id=" in href:
+            full = urljoin(BASE, href)
+            detail_urls.add(full)
+
+    if not detail_urls:
+        print("[北美館] 列表頁中沒有找到任何 Exhibition_Special.aspx 連結")
+        return results
+
+    print(f"[北美館] 在列表頁中找到 {len(detail_urls)} 個展覽連結")
+
+    # 3) 逐一進入詳細頁解析
+    for ex_link in sorted(detail_urls):
+        try:
+            r_detail = safe_get(ex_link, tag="[北美館 詳細頁]")
+            if r_detail is None:
+                continue
+
+            html = bs(r_detail.text, "html.parser")
+
+            # 標題
             title = ""
-            try:
-                a = it.find_element(By.XPATH, "./div[2]/h3/a")
-                title = (a.text or "").strip()
-            except Exception:
-                pass
+            node_title = html.find("span", id="CPContent_lbExName")
+            if node_title:
+                title = node_title.get_text(strip=True)
+            else:
+                # 退而求其次抓 <title> 裡的內容
+                if html.title and html.title.string:
+                    title = html.title.string.strip()
 
-            # 展覽時間（官網常把日期 + 時段寫一起）
-            ex_time = ""
-            try:
-                ex_time = it.find_element(By.XPATH, "./div[2]/p[1]").text.strip()
-            except Exception:
-                pass
+            # 日期（官方通常會把起迄日都放這裡）
+            ex_date = ""
+            node_date = html.find("span", id="CPContent_lbDate")
+            if node_date:
+                ex_date = node_date.get_text(" ", strip=True)
 
-            # 展覽地點
+            # 地點：比較保守的做法，用關鍵字「地點」去抓
             ex_place = ""
-            try:
-                ex_place = it.find_element(By.XPATH, "./div[2]/p[2]").text.strip()
-            except Exception:
-                pass
+            for p in html.find_all(["p", "span", "div"]):
+                txt = p.get_text(" ", strip=True)
+                if "地點" in txt:
+                    # 嘗試切掉「地點：」前綴
+                    if "：" in txt:
+                        ex_place = txt.split("：", 1)[1].strip()
+                    elif ":" in txt:
+                        ex_place = txt.split(":", 1)[1].strip()
+                    else:
+                        ex_place = txt.strip()
+                    if ex_place:
+                        break
 
-            # 展覽連結
-            ex_link = ""
-            try:
-                link = it.find_element(By.XPATH, "./div[2]/div")
-                link_num = link.get_attribute("id")[-3:] or ""
-                ex_link = f"{BASE}Exhibition/Exhibition_Special.aspx?ddlLang=zh-tw&id={link_num}"
-            except Exception:
-                pass
+            # 圖片：先嘗試找特定 id，再退而求其次找第一張較大的圖片
+            ex_img = ""
+            img = html.find("img", id="CPContent_imgEx")
+            if not img:
+                # 再試試其他 img
+                candidates = html.find_all("img")
+                if candidates:
+                    img = candidates[0]
+            if img and img.get("src"):
+                ex_img = urljoin(BASE, img["src"])
 
-            if any([title, ex_time, ex_place, img_src, ex_link]):
+            # 時間：北美館原本列表頁是把日期+時間混在一起
+            # 如果需要更精確時間，可以再補強解析邏輯
+            ex_time = ex_date
+
+            if any([title, ex_date, ex_place, ex_img, ex_link]):
                 results.append({
                     "museum": museum_name,
                     "title": title,
-                    "date": ex_time,      # 這裡日期+時間混在一起，暫時放 date
+                    "date": ex_date,
                     "topic": "",
                     "url": ex_link,
-                    "image_url": img_src,
+                    "image_url": ex_img,
                     "location": ex_place,
                     "time": ex_time,
                     "category": "",
                     "extra": "",
                 })
-    finally:
-        driver.quit()
+
+        except Exception as e:
+            print("[北美館] 解析單一展覽時發生錯誤，已跳過此筆。錯誤內容：", repr(e))
+            continue
 
     return results
