@@ -3,7 +3,16 @@ import json
 import pandas as pd
 import os
 
-API_KEY = ""  # 請替換成你的 Google Places API Key
+from dotenv import load_dotenv
+
+# 載入 .env（預設讀取目前專案目錄）
+load_dotenv()
+
+API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
+
+if not API_KEY:
+    raise RuntimeError("找不到 GOOGLE_PLACES_API_KEY，請確認 .env 設定")
+
 BASE_URL = "https://places.googleapis.com/v1/places:searchText"
 
 FIELD_MASK = ",".join([
