@@ -183,4 +183,6 @@ def fetch_ntnu_exhibitions():
         })
 
     return results
-print(fetch_ntnu_exhibitions())
+
+if __name__ == "__main__":
+    print(fetch_ntnu_exhibitions())

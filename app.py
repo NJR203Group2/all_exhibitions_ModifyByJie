@@ -65,36 +65,26 @@ def normalize(ex):
 
 
 def collect_all_exhibitions():
-    """呼叫各館爬蟲，收集所有展覽資訊。"""
+    """呼叫各館爬蟲，收集所有展覽資訊（單館失敗不影響整體）。"""
     all_exhibitions = []
 
-    print("抓取 松山文創園區...")
-    all_exhibitions.extend(fetch_songshan_exhibitions())
-    print(f"松山累積筆數：{len(all_exhibitions)}")
+    def run(museum_name, fn):
+        try:
+            print(f"抓取 {museum_name}...")
+            data = fn() or []
+            all_exhibitions.extend(data)
+            print(f"{museum_name} 完成，本次 {len(data)} 筆，累積 {len(all_exhibitions)} 筆")
+        except Exception:
+            print(f"{museum_name} 抓取失敗，跳過，繼續下一館")
+            traceback.print_exc()
 
-    print("抓取 國立故宮博物院...")
-    all_exhibitions.extend(fetch_npm_exhibitions())
-    print(f"故宮累積筆數：{len(all_exhibitions)}")
-
-    print("抓取 當代藝術館...")
-    all_exhibitions.extend(fetch_moca_exhibitions())
-    print(f"當代累積筆數：{len(all_exhibitions)}")
-
-    print("抓取 華山1914文創園區...")
-    all_exhibitions.extend(fetch_huashan_exhibitions())
-    print(f"華山累積筆數：{len(all_exhibitions)}")
-
-    print("抓取 富邦美術館...")
-    all_exhibitions.extend(fetch_fubon_exhibitions())
-    print(f"富邦累積筆數：{len(all_exhibitions)}")
-
-    print("抓取 臺北市立美術館...")
-    all_exhibitions.extend(fetch_tfam_exhibitions())
-    print(f"北美館累積筆數：{len(all_exhibitions)}")
-
-    print("抓取 師大美術館...")
-    all_exhibitions.extend(fetch_ntnu_exhibitions())
-    print(f"師大累積筆數：{len(all_exhibitions)}")
+    run("松山文創園區", fetch_songshan_exhibitions)
+    run("國立故宮博物院", fetch_npm_exhibitions)
+    run("當代藝術館", fetch_moca_exhibitions)
+    run("華山1914文創園區", fetch_huashan_exhibitions)
+    run("富邦美術館", fetch_fubon_exhibitions)
+    run("臺北市立美術館", fetch_tfam_exhibitions)
+    run("師大美術館", fetch_ntnu_exhibitions)
 
     return all_exhibitions
 
@@ -121,64 +111,81 @@ def save_to_csv(base_filename, exhibitions):
 
 
 def save_to_db(exhibitions):
-    """
-    將展覽資料寫入 GCP VM 上的 MariaDB：
-      host=127.0.0.1, port=3307, user=test, password=123456, database=exhibition_db
-    目標資料表：exhibitions_20251204
-    （此資料表需事先新增 batch_id 與 created_at 欄位）
-    """
     print("準備寫入 MariaDB exhibitions_20251204...")
 
-    # 建立批次 ID 與 created_at 時間字串
-    batch_id = datetime.now().strftime("%Y%m%d%H%M")       # 例如：202512072215
+    batch_id = datetime.now().strftime("%Y%m%d%H%M")
     created_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = mysql.connector.connect(
-        host="127.0.0.1",
-        port=3307,
-        user="test",
-        password="123456",
-        database="exhibition_db",
-    )
-    cursor = conn.cursor()
+    # 讓你確定程式真的有進入 DB 區塊
+    print(f"[DB] batch_id={batch_id}, rows={len(exhibitions)}")
 
-    sql = """
-        INSERT INTO exhibitions_20251204
-        (museum, title, date, start_date, end_date, is_permanent,
-         topic, url, image_url, location, time,
-         batch_id, created_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s)
-    """
+    try:
+        print("[DB] connect() -> 127.0.0.1:3307 ...")
+        conn = mysql.connector.connect(
+            host="127.0.0.1",
+            port=3307,
+            user="test",
+            password="123456",
+            database="exhibition_db",
+            connection_timeout=5,          # 超重要：避免卡住
+            ssl_disabled=True,   # 關鍵
+            use_pure=True,       # 關鍵
+            autocommit=False,
+        )
+        print("[DB] connect OK")
 
-    count = 0
-    for ex in exhibitions:
-        n = normalize(ex)
-        cursor.execute(
-            sql,
-            (
-                n["館別"],
-                n["展覽名稱"],
-                n["展覽日期"],
-                n["start_date"],
-                n["end_date"],
-                n["is_permanent"],
-                n["展覽主題"],
-                n["展覽連結"],
-                n["展覽圖片"],
-                n["展覽地點"],
-                n["展覽時間"],
+        cursor = conn.cursor()
+
+        # 確認真的連到你要的 DB
+        cursor.execute("SELECT DATABASE(), USER(), VERSION();")
+        db_name, user_name, ver = cursor.fetchone()
+        print(f"[DB] DATABASE()={db_name} USER()={user_name} VERSION()={ver}")
+
+        sql = """
+            INSERT INTO exhibitions_20251204
+            (museum, title, date, start_date, end_date, is_permanent,
+             topic, url, image_url, location, time,
+             batch_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        # 用 executemany，一次送，速度快、也比較不容易看起來卡住
+        rows = []
+        for ex in exhibitions:
+            n = normalize(ex)
+            rows.append((
+                n["館別"] or None,
+                n["展覽名稱"] or None,
+                n["展覽日期"] or None,
+                n["start_date"] or None,
+                n["end_date"] or None,
+                str(n["is_permanent"]) if n["is_permanent"] != "" else None,
+                n["展覽主題"] or None,
+                n["展覽連結"] or None,
+                n["展覽圖片"] or None,
+                n["展覽地點"] or None,
+                n["展覽時間"] or None,
                 batch_id,
                 created_at_str,
-            ),
-        )
-        count += 1
+            ))
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        print("[DB] executemany() ...")
+        cursor.executemany(sql, rows)
+        print(f"[DB] executemany OK, rowcount(last batch)={cursor.rowcount}")
 
-    print(f"MariaDB 寫入完成，共寫入 {count} 筆資料，batch_id = {batch_id}")
+        print("[DB] commit() ...")
+        conn.commit()
+        print("[DB] commit OK")
+
+        cursor.close()
+        conn.close()
+
+        print(f"MariaDB 寫入完成，共寫入 {len(rows)} 筆資料，batch_id = {batch_id}")
+
+    except Exception:
+        print("[DB] 寫入失敗，traceback：")
+        traceback.print_exc()
+        raise
 
 
 def main():
@@ -202,5 +209,5 @@ def main():
 
 
 if __name__ == "__main__":
-    print(f"👉 __name__ = {__name__}")
+    print(f"__name__ = {__name__}")
     main()

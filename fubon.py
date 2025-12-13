@@ -152,5 +152,3 @@ def fetch_fubon_exhibitions():
 
 if __name__ == "__main__":
     print(fetch_fubon_exhibitions())
-
-print(fetch_fubon_exhibitions())

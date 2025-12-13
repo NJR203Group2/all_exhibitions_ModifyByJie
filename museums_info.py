@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import os
 
-API_KEY = "YOUR API KEY"  # 請替換成你的 Google Places API Key
+API_KEY = ""  # 請替換成你的 Google Places API Key
 BASE_URL = "https://places.googleapis.com/v1/places:searchText"
 
 FIELD_MASK = ",".join([

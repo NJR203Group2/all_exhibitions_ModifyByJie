@@ -1,9 +1,12 @@
 import re
+import time
+import random
 from urllib.parse import urljoin
 
 import requests as req
 from bs4 import BeautifulSoup as bs
 from requests.utils import requote_uri
+from requests.exceptions import ReadTimeout, RequestException
 import urllib3
 
 from selenium import webdriver
@@ -12,15 +15,39 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 session = req.Session()
 session.verify = False
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+})
+
+def safe_get(url, timeout=(10, 60), retries=3, backoff=2.0):
+    """
+    timeout=(connect_timeout, read_timeout)
+    retries: 失敗重試次數
+    """
+    last_err = None
+    for i in range(retries):
+        try:
+            # 小抖動，避免連打太快
+            time.sleep(0.2 + random.random() * 0.4)
+            resp = session.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+        except (ReadTimeout, RequestException) as e:
+            last_err = e
+            wait = (backoff ** i) + random.random()
+            print(f"[Huashan] request failed ({i+1}/{retries}) -> {url}\n  {repr(e)}\n  wait {wait:.1f}s")
+            time.sleep(wait)
+    return None
 
 
 def get_driver(headless=True):
     from selenium.webdriver.chrome.options import Options
     opts = Options()
     if headless:
-        # 某些環境對 --headless=new 會不穩，可以改用傳統寫法
         opts.add_argument("--headless")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--lang=zh-TW")
@@ -35,23 +62,6 @@ def get_driver(headless=True):
 
 
 def parse_huashan_date(raw: str):
-    """
-    處理華山展覽日期格式，例如：
-    202510.03(五) - 202511.30(日)
-    202511.07(五) - 202511.09(日)
-    202510.01(三) - 202601.05(一)
-    202505.08(四) - 202512.31(三)
-    202511.21(五) - 202511.23(日)
-
-    型態為：YYYYMM.DD(週) - YYYYMM.DD(週)
-
-    規則：
-    - 有開始、有結束：一般展期 → is_permanent = 0
-    - 若未來只出現單一日期：視為長期/常設 → end_date=None, is_permanent=1
-
-    回傳：start_date, end_date, is_permanent
-    日期格式為 'YYYY-MM-DD' 或 None
-    """
     if not raw:
         return None, None, 0
 
@@ -60,17 +70,14 @@ def parse_huashan_date(raw: str):
         return None, None, 0
 
     def parse_token(token: str):
-        # 只保留數字和小數點
         cleaned = re.sub(r"[^0-9\.]", "", token)
-        # 例如 202510.03 -> YYYY=2025, MM=10, DD=03
         m = re.match(r"^(\d{4})(\d{2})\.(\d{1,2})$", cleaned)
         if not m:
             return None
         y, mm, dd = m.groups()
         return f"{y}-{int(mm):02d}-{int(dd):02d}"
 
-    # 標準情況：有 "-"，兩邊各一個日期
-    norm = s.replace("－", "-")  # 有時候會用全形 dash
+    norm = s.replace("－", "-")
     parts = re.split(r"\s*-\s*", norm, maxsplit=1)
 
     if len(parts) == 2:
@@ -79,14 +86,13 @@ def parse_huashan_date(raw: str):
         end = parse_token(right)
 
         if start and end:
-            return start, end, 0   # 一般展期
+            return start, end, 0
         if start and not end:
-            return start, None, 1  # 長期展
+            return start, None, 1
         if start:
             return start, None, 0
         return None, None, 0
 
-    # 若只出現一段（預防）
     start = parse_token(norm)
     if start:
         return start, None, 1
@@ -115,41 +121,39 @@ def fetch_huashan_exhibitions():
         items = container.find_elements(By.XPATH, "./div")
 
         for it in items:
-            # 展覽連結
             ex_link = ""
             try:
                 img = it.find_element(By.XPATH, "./img")
                 onclick = img.get_attribute("onclick") or ""
                 m = re.search(r"'(/[^']+)'", onclick)
                 if m:
-                    url_part = m.group(1)
-                    ex_link = urljoin(base_url, url_part)
+                    ex_link = urljoin(base_url, m.group(1))
             except Exception:
                 pass
 
             if not ex_link.startswith(("http://", "https://")):
                 continue
 
-            resp = session.get(ex_link, timeout=20)
-            resp.raise_for_status()
+            # ✅ 用 safe_get + 拉長 read timeout + 失敗跳過單筆
+            resp = safe_get(ex_link, timeout=(10, 60), retries=3)
+            if resp is None:
+                print(f"[Huashan] skip (timeout): {ex_link}")
+                continue
+
             html = bs(resp.text, "html.parser")
 
-            # 展覽名稱
             title = ""
             ex_title = html.find("div", class_="article-title page")
             if ex_title:
                 title = ex_title.get_text(strip=True)
 
-            # 展覽日期（原始字串）
             ex_date = ""
             dates = [d.get_text(strip=True) for d in html.find_all("div", class_="card-date")]
             if dates:
                 ex_date = " - ".join(dates[:2])
 
-            # 解析日期
             start_date, end_date, is_permanent = parse_huashan_date(ex_date)
 
-            # 展覽時間
             ex_time = ""
             node = html.find("div", class_="card-time")
             if node:
@@ -157,13 +161,11 @@ def fetch_huashan_exhibitions():
                 if re.match(r"^\d", raw):
                     ex_time = raw
 
-            # 展覽圖片
             ex_img = ""
             first_img = html.select_one("span[rel] img")
             if first_img and first_img.get("src"):
                 ex_img = requote_uri(urljoin(base_url, first_img["src"]))
 
-            # 展覽地點
             ex_place = ""
             place = html.find("a", class_="openMap")
             if place:
@@ -172,10 +174,10 @@ def fetch_huashan_exhibitions():
             results.append({
                 "museum": museum_name,
                 "title": title,
-                "date": ex_date,           # 原始日期字串
-                "start_date": start_date,  # 解析後開始日期
-                "end_date": end_date,      # 解析後結束日期
-                "is_permanent": is_permanent,  # 0: 一般展期, 1: 長期/常設
+                "date": ex_date,
+                "start_date": start_date,
+                "end_date": end_date,
+                "is_permanent": is_permanent,
                 "topic": "",
                 "url": ex_link,
                 "image_url": ex_img,
@@ -184,10 +186,13 @@ def fetch_huashan_exhibitions():
                 "category": "",
                 "extra": "",
             })
+
     finally:
         driver.quit()
 
     return results
 
 
-print(fetch_huashan_exhibitions())
+# ✅ 重要：不要在 import 時執行爬蟲
+if __name__ == "__main__":
+    print(fetch_huashan_exhibitions())

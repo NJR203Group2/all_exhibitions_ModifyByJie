@@ -188,4 +188,6 @@ def fetch_tfam_exhibitions():
         driver.quit()
 
     return results
-print(fetch_tfam_exhibitions())
+
+if __name__ == "__main__":
+    print(fetch_tfam_exhibitions())
